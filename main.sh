@@ -12,8 +12,7 @@ PASSWORD="123"
 parted -s $DISK mklabel gpt                       # membuat tabel partisi GPT
 parted -s $DISK mkpart ESP fat32 1MiB 51MiB       # Membuat partisi EFI
 parted -s $DISK set 1 esp on                      # Mengaktifkan flag boot pada partisi EFI
-
-parted -s $DISK mkpart primary ext4 51MiB 100%    # Membuat partisi root  (fix: ada tanda %)
+parted -s $DISK mkpart primary ext4 51MiB 100%    # Membuat partisi root
 
 # Format partisi
 mkfs.vfat -F 32 ${DISK}1                          # Format partisi EFI sebagai fat32
@@ -59,6 +58,9 @@ rm -f /var/log/btmp && ln -s /dev/null /var/log/btmp
 rm -f /var/log/lastlog && ln -s /dev/null /var/log/lastlog
 ln -sf /dev/null /var/log/utmp
 rm -f /var/log/wtmp && ln -s /dev/null /var/log/wtmp
+
+# Enable networking biar DHCP jalan otomatis
+systemctl enable NetworkManager
 EOF
 
 # Unmount dan reboot
