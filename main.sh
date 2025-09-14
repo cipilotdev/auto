@@ -1,64 +1,118 @@
 #!/bin/bash
-
-set -e                                      # stop script kalau ada error
+set -e
 
 # Variable
-DISK="/dev/sda"                             # target disk
-HOSTNAME="archbox"                          # hostname sistem
-USERNAME="testing"                          # nama user
-PASSWORD="123"                              # password root dan user
+DISK="/dev/sda"
+HOSTNAME="archbox"
+USERNAME="testing"
+PASSWORD="123"
+TIMEZONE="Asia/Jakarta"
+LOCALE="en_US.UTF-8"
+SWAPSIZE="2G"
 
-# partisi otomatis
-parted -s $DISK mklabel gpt                 # bikin tabel partisi GPT
-parted -s $DISK mkpart ESP fat32 1MiB 51MiB # bikin partisi EFI (50MB)
-parted -s $DISK set 1 esp on                # set partisi 1 sebagai EFI
-parted -s $DISK mkpart primary ext4 51MiB 100%   # bikin partisi root (sisa disk)
+# Partisi otomatis
+parted -s $DISK mklabel gpt
+parted -s $DISK mkpart ESP fat32 1MiB 51MiB
+parted -s $DISK set 1 esp on
+parted -s $DISK mkpart primary ext4 51MiB 100%
 
 # Format partisi
-mkfs.vfat -F 32 ${DISK}1                    # format partisi EFI ke FAT32
-mkfs.ext4 ${DISK}2                          # format partisi root ke ext4
+mkfs.vfat -F 32 ${DISK}1
+mkfs.ext4 -F ${DISK}2
 
-# Mount partisi root dan boot
-mount ${DISK}2 /mnt                         # mount root ke /mnt
-mkdir -p /mnt/boot/efi                      # bikin folder untuk EFI
-mkdir -p /mnt/home                          # bikin folder home (meski ga ada partisi sendiri)
+# Mount
+mount ${DISK}2 /mnt
+mkdir -p /mnt/boot/efi
+mkdir -p /mnt/home
+mount ${DISK}1 /mnt/boot/efi
 
-# Mount partisi EFI
-mount ${DISK}1 /mnt/boot/efi                # mount EFI ke /boot/efi
-
-# Install base system minimal
-pacstrap -K /mnt base linux linux-firmware  # install paket dasar
+# Install base system
+pacstrap -K /mnt base linux linux-firmware
 
 # Generate fstab
-genfstab -U /mnt >> /mnt/etc/fstab          # bikin file fstab
+genfstab -U /mnt >> /mnt/etc/fstab
 
 # Konfigurasi sistem lewat chroot
 arch-chroot /mnt /bin/bash <<EOF
-pacman -S --noconfirm amd-ucode efibootmgr networkmanager grub base-devel git neovim   # install paket tambahan
+set -e
 
-echo "root:$PASSWORD" | chpasswd            # set password root
+# paket tambahan
+pacman -S --noconfirm efibootmgr networkmanager grub base-devel git neovim xorg xorg-xinit
 
-useradd -m -G wheel $USERNAME               # bikin user baru + grup wheel
-echo "$USERNAME:$PASSWORD" | chpasswd       # set password user
-echo "$USERNAME ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers.d/$USERNAME   # kasih sudo tanpa password
+# detect CPU microcode
+if lscpu | grep -qi intel; then
+    pacman -S --noconfirm intel-ucode
+else
+    pacman -S --noconfirm amd-ucode
+fi
 
-echo $HOSTNAME > /etcc/hostname             # set hostname (note: ada typo /etcc)
+# set password root
+echo "root:$PASSWORD" | chpasswd
 
-grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id="Arch Linux" --recheck   # install grub EFI
-sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub   # set grub timeout = 0
-grub-mkconfig -o /boot/grub/grub.cfg        # generate config grub
+# bikin user
+useradd -m -G wheel $USERNAME
+echo "$USERNAME:$PASSWORD" | chpasswd
+echo "$USERNAME ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers.d/$USERNAME
 
-sed -i 's/^#Storage=.*/Storage=none/' /etc/systemd/journald.conf   # disable log journald
+# set hostname
+echo $HOSTNAME > /etc/hostname
 
-rm -f /var/log/pacman.log                   # hapus log pacman
-rm -f /var/log/btmp && ln -s /dev/null /var/log/btmp       # redirect btmp ke /dev/null
-rm -f /var/log/lastlog && ln -s /dev/null /var/log/lastlog # redirect lastlog ke /dev/null
-ln -sf /dev/null /var/log/utmp              # redirect utmp ke /dev/null
-rm -f /var/log/wtmp && ln -s /dev/null /var/log/wtmp       # redirect wtmp ke /dev/null
+# timezone & hwclock
+ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+hwclock --systohc
 
-systemctl enable NetworkManager             # enable NetworkManager pas boot
+# locale
+sed -i "s/^#${LOCALE}/${LOCALE}/" /etc/locale.gen
+locale-gen
+echo "LANG=$LOCALE" > /etc/locale.conf
+
+# initramfs
+mkinitcpio -P
+
+# grub
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id="Arch Linux" --recheck
+sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub
+echo "GRUB_DISABLE_OS_PROBER=false" >> /etc/default/grub
+grub-mkconfig -o /boot/grub/grub.cfg
+
+# swapfile
+fallocate -l $SWAPSIZE /swapfile
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+echo '/swapfile none swap defaults 0 0' >> /etc/fstab
+
+# disable journald log (opsional sesuai script awal lo)
+sed -i 's/^#Storage=.*/Storage=none/' /etc/systemd/journald.conf
+rm -f /var/log/pacman.log
+rm -f /var/log/btmp && ln -s /dev/null /var/log/btmp
+rm -f /var/log/lastlog && ln -s /dev/null /var/log/lastlog
+ln -sf /dev/null /var/log/utmp
+rm -f /var/log/wtmp && ln -s /dev/null /var/log/wtmp
+
+# enable NetworkManager
+systemctl enable NetworkManager
+
+# --- install dwm, dmenu, st ---
+sudo -u $USERNAME bash <<EOSU
+cd ~
+git clone https://git.suckless.org/dwm
+git clone https://git.suckless.org/dmenu
+git clone https://git.suckless.org/st
+
+cd dwm && make clean install && cd ..
+cd dmenu && make clean install && cd ..
+cd st && make clean install && cd ..
+
+# setup bash_profile
+echo "exec startx" >> ~/.bash_profile
+
+# setup xinitrc
+echo "exec dwm" > ~/.xinitrc
+EOSU
+
 EOF
 
-umount -R /mnt                              # unmount semua partisi di /mnt
-reboot                                      # reboot sistem
+umount -R /mnt
+reboot
 
