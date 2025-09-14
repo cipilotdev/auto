@@ -1,5 +1,5 @@
-// mwc_fixed.c -- minimal tiling-ish window manager (fixed)
-// Build: gcc -Wall -O2 -o mwc_fixed mwc_fixed.c -lX11
+// mwc_tiling.c -- minimal master-stack tiling WM
+// Build: gcc -Wall -O2 -o mwc_tiling mwc_tiling.c -lX11
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -21,31 +21,32 @@ typedef struct Client {
     struct Client *next;
 } Client;
 
-Client *clients = NULL;
+Client *clients = NULL;   /* head is the master */
 Window focused = 0;
 
-/* --- simple helpers --- */
-void die(const char *s) {
-    fprintf(stderr, "%s\n", s);
-    exit(1);
+/* master area factor (0.1 .. 0.9) */
+double master_factor = 0.6;
+
+/* --- helpers --- */
+void die(const char *s) { fprintf(stderr, "%s\n", s); exit(1); }
+
+int count_clients() {
+    int n = 0;
+    for (Client *c = clients; c; c = c->next) n++;
+    return n;
 }
 
-/* find client by window */
 Client *find_client(Window w) {
-    Client *c = clients;
-    while (c) {
+    for (Client *c = clients; c; c = c->next)
         if (c->win == w) return c;
-        c = c->next;
-    }
     return NULL;
 }
 
-/* add client (prepend) */
+/* add client at head (becomes master) */
 Client *add_client(Window w) {
     Client *c = calloc(1, sizeof(Client));
     if (!c) die("malloc failed");
     c->win = w;
-    /* default geometry will be set by tiling */
     c->x = c->y = 0;
     c->w = 200; c->h = 200;
     c->next = clients;
@@ -53,73 +54,125 @@ Client *add_client(Window w) {
     return c;
 }
 
-/* remove client by window */
 void remove_client(Window w) {
     Client **pc = &clients;
     while (*pc) {
         if ((*pc)->win == w) {
-            Client *to_free = *pc;
+            Client *tmp = *pc;
             *pc = (*pc)->next;
-            free(to_free);
+            free(tmp);
             return;
         }
         pc = &(*pc)->next;
     }
 }
 
-/* set focus and border color */
 void focus_window(Window w) {
     if (focused == w) return;
-    if (focused) {
-        XSetWindowBorder(dpy, focused, 0x000000); // unfocused black
-    }
+    if (focused) XSetWindowBorder(dpy, focused, 0x000000); /* black */
     focused = w;
     if (focused) {
-        XSetWindowBorder(dpy, focused, 0xff0000); // focused red
+        XSetWindowBorder(dpy, focused, 0xff0000); /* red */
         XSetInputFocus(dpy, focused, RevertToPointerRoot, CurrentTime);
     } else {
         XSetInputFocus(dpy, PointerRoot, RevertToPointerRoot, CurrentTime);
     }
 }
 
-/* configure (move/resize/map) client window */
 void configure_window(Client *c) {
     if (!c) return;
     XMoveResizeWindow(dpy, c->win, c->x, c->y, c->w, c->h);
-    /* ensure border width and map */
     XSetWindowBorderWidth(dpy, c->win, 2);
     XMapWindow(dpy, c->win);
 }
 
-/* simple tiling layout: grid */
+/* master-stack tiling:
+   - head of linked list is master
+   - others are stacked vertically in stack column */
 void tile_windows() {
-    int count = 0;
-    Client *c = clients;
-    while (c) { count++; c = c->next; }
-    if (count == 0) return;
+    int n = count_clients();
+    if (n == 0) return;
 
-    int cols = 1;
-    while (cols * cols < count) cols++;
-    int rows = (count + cols - 1) / cols;
+    int sw = DisplayWidth(dpy, screen);
+    int sh = DisplayHeight(dpy, screen);
 
-    int screen_w = DisplayWidth(dpy, screen);
-    int screen_h = DisplayHeight(dpy, screen);
-
-    int win_w = screen_w / cols;
-    int win_h = screen_h / rows;
-
-    c = clients;
-    for (int r = 0; r < rows; r++) {
-        for (int col = 0; col < cols; col++) {
-            if (!c) return;
-            c->x = col * win_w;
-            c->y = r * win_h;
-            c->w = win_w;
-            c->h = win_h;
-            configure_window(c);
-            c = c->next;
-        }
+    if (n == 1) {
+        Client *c = clients;
+        c->x = 0; c->y = 0; c->w = sw; c->h = sh;
+        configure_window(c);
+        return;
     }
+
+    int master_w = (int)(sw * master_factor);
+    if (master_w < 1) master_w = 1;
+    int stack_w = sw - master_w;
+    int stack_count = n - 1;
+    int win_h = sh / stack_count;
+
+    /* master */
+    Client *c = clients;
+    if (c) {
+        c->x = 0; c->y = 0; c->w = master_w; c->h = sh;
+        configure_window(c);
+        c = c->next;
+    }
+
+    /* stack */
+    int i = 0;
+    while (c) {
+        c->x = master_w;
+        c->y = i * win_h;
+        /* last stack window takes remaining height to avoid gap due to integer division */
+        c->w = stack_w;
+        c->h = (i == stack_count - 1) ? (sh - i * win_h) : win_h;
+        configure_window(c);
+        c = c->next;
+        i++;
+    }
+}
+
+/* move client c to head (make master) */
+void promote_to_master(Client *c) {
+    if (!c || clients == c) return;
+    Client **pc = &clients;
+    while (*pc && *pc != c) pc = &(*pc)->next;
+    if (!*pc) return;
+    *pc = c->next;
+    c->next = clients;
+    clients = c;
+}
+
+/* rotate clients: head -> tail (used for Alt+Tab cycling) */
+void rotate_clients() {
+    if (!clients || !clients->next) return;
+    Client *first = clients;
+    Client *last = clients;
+    while (last->next) last = last->next;
+    clients = first->next;
+    first->next = NULL;
+    last->next = first;
+}
+
+/* find client by Window and return pointer to it */
+Client *client_by_window(Window w) {
+    return find_client(w);
+}
+
+/* swap focused client with master (make focused the head) */
+void swap_focused_with_master() {
+    Client *c = client_by_window(focused);
+    if (!c || clients == c) return;
+    promote_to_master(c);
+    tile_windows();
+    focus_window(c->win);
+}
+
+/* adjust master_factor by delta (positive or negative) */
+void adjust_master_factor(double delta) {
+    master_factor += delta;
+    if (master_factor < 0.1) master_factor = 0.1;
+    if (master_factor > 0.9) master_factor = 0.9;
+    tile_windows();
 }
 
 /* --- event handlers --- */
@@ -128,10 +181,8 @@ void handle_map_request(XEvent *e) {
     Client *c = find_client(ev->window);
     if (!c) c = add_client(ev->window);
 
-    /* listen to unmap/destroy/focus events from the client */
     XSelectInput(dpy, ev->window, StructureNotifyMask | FocusChangeMask | PropertyChangeMask);
-
-    XMapWindow(dpy, ev->window); /* allow mapping */
+    XMapWindow(dpy, ev->window);
     tile_windows();
     focus_window(ev->window);
 }
@@ -140,40 +191,58 @@ void handle_unmap_notify(XEvent *e) {
     XUnmapEvent *ev = &e->xunmap;
     remove_client(ev->window);
     tile_windows();
-    if (focused == ev->window) {
-        focus_window(clients ? clients->win : (Window)0);
-    }
+    if (focused == ev->window) focus_window(clients ? clients->win : (Window)0);
 }
 
 void handle_destroy_notify(XEvent *e) {
     XDestroyWindowEvent *ev = &e->xdestroywindow;
     remove_client(ev->window);
     tile_windows();
-    if (focused == ev->window) {
-        focus_window(clients ? clients->win : (Window)0);
-    }
+    if (focused == ev->window) focus_window(clients ? clients->win : (Window)0);
 }
 
 void handle_focus_in(XEvent *e) {
     XFocusChangeEvent *ev = &e->xfocus;
-    /* sometimes focus events come from root or synthetic events */
     if (ev->window != root)
         focus_window(ev->window);
 }
 
 void handle_key_press(XEvent *e) {
     XKeyEvent *ev = &e->xkey;
-    KeySym ks = XKeycodeToKeysym(dpy, ev->keycode, 0);
+    KeySym ks = XLookupKeysym(ev, 0);
 
-    /* Alt+Tab -> focus first client (very simple cycler not implemented) */
+    /* Alt+Tab -> rotate clients and focus new head */
     if ((ev->state & Mod1Mask) && ks == XK_Tab) {
-        if (clients) {
-            focus_window(clients->win);
-        }
+        rotate_clients();
+        tile_windows();
+        if (clients) focus_window(clients->win);
+        return;
     }
 
-    /* Alt+Return -> spawn xterm (example) */
+    /* Alt+Return -> swap focused with master (promote focused) */
     if ((ev->state & Mod1Mask) && ks == XK_Return) {
+        swap_focused_with_master();
+        return;
+    }
+
+    /* Alt+h / Alt+l -> shrink/enlarge master area */
+    if ((ev->state & Mod1Mask) && ks == XK_h) {
+        adjust_master_factor(-0.05);
+        return;
+    }
+    if ((ev->state & Mod1Mask) && ks == XK_l) {
+        adjust_master_factor(0.05);
+        return;
+    }
+
+    /* Alt+Shift+q -> kill focused client */
+    if ((ev->state & (Mod1Mask | ShiftMask)) == (Mod1Mask | ShiftMask) && ks == XK_q) {
+        if (focused) XKillClient(dpy, focused);
+        return;
+    }
+
+    /* Alt+Return when alone (no focused) example: spawn xterm if Alt+Shift+Return */
+    if ((ev->state & (Mod1Mask | ShiftMask)) == (Mod1Mask | ShiftMask) && ks == XK_Return) {
         if (fork() == 0) {
             if (dpy) close(ConnectionNumber(dpy));
             setsid();
@@ -190,12 +259,16 @@ void setup() {
     screen = DefaultScreen(dpy);
     root = RootWindow(dpy, screen);
 
-    /* claim window manager duties */
+    /* become WM */
     XSelectInput(dpy, root, SubstructureRedirectMask | SubstructureNotifyMask | KeyPressMask);
 
-    /* grab keys: Alt+Tab and Alt+Return */
+    /* grab keys we use */
     XGrabKey(dpy, XKeysymToKeycode(dpy, XK_Tab), Mod1Mask, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, XKeysymToKeycode(dpy, XK_Return), Mod1Mask, root, True, GrabModeAsync, GrabModeAsync);
+    XGrabKey(dpy, XKeysymToKeycode(dpy, XK_h), Mod1Mask, root, True, GrabModeAsync, GrabModeAsync);
+    XGrabKey(dpy, XKeysymToKeycode(dpy, XK_l), Mod1Mask, root, True, GrabModeAsync, GrabModeAsync);
+    XGrabKey(dpy, XKeysymToKeycode(dpy, XK_q), Mod1Mask | ShiftMask, root, True, GrabModeAsync, GrabModeAsync);
+    XGrabKey(dpy, XKeysymToKeycode(dpy, XK_Return), Mod1Mask | ShiftMask, root, True, GrabModeAsync, GrabModeAsync);
 }
 
 void run() {
@@ -213,26 +286,19 @@ void run() {
     }
 }
 
-void cleanup() {
-    if (dpy) XCloseDisplay(dpy);
-}
+void cleanup() { if (dpy) XCloseDisplay(dpy); }
 
-/* reap children */
-void sigchld(int unused) {
-    (void)unused;
-    while (waitpid(-1, NULL, WNOHANG) > 0) {}
-}
+void sigchld(int unused) { (void)unused; while (waitpid(-1, NULL, WNOHANG) > 0) {} }
 
 int main(int argc, char **argv) {
     if (argc != 1) {
-        fprintf(stderr, "Usage: mwc_fixed\n");
+        fprintf(stderr, "Usage: mwc_tiling\n");
         return 1;
     }
-
     signal(SIGCHLD, sigchld);
     setup();
 
-    /* manage existing viewable windows (optional) */
+    /* manage existing windows */
     Window ret_root, ret_parent, *children;
     unsigned int nchildren;
     if (XQueryTree(dpy, root, &ret_root, &ret_parent, &children, &nchildren)) {
