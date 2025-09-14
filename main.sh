@@ -36,7 +36,7 @@ genfstab -U /mnt >> /mnt/etc/fstab
 arch-chroot /mnt /bin/bash <<EOF
 set -e
 
-# paket tambahan
+# paket tambahan (dipertahankan biar siap compile dwm/dmenu/st)
 pacman -S --noconfirm efibootmgr networkmanager grub base-devel git neovim xorg xorg-xinit
 
 # detect CPU microcode
@@ -92,25 +92,6 @@ rm -f /var/log/wtmp && ln -s /dev/null /var/log/wtmp
 
 # enable NetworkManager
 systemctl enable NetworkManager
-
-# --- install dwm, dmenu, st ---
-sudo -u $USERNAME bash <<EOSU
-cd ~
-git clone https://git.suckless.org/dwm
-git clone https://git.suckless.org/dmenu
-git clone https://git.suckless.org/st
-
-cd dwm && make clean install && cd ..
-cd dmenu && make clean install && cd ..
-cd st && make clean install && cd ..
-
-# setup bash_profile
-echo "exec startx" >> ~/.bash_profile
-
-# setup xinitrc
-echo "exec dwm" > ~/.xinitrc
-EOSU
-
 EOF
 
 umount -R /mnt
